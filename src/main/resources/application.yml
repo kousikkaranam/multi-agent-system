@@ -11,18 +11,15 @@ spring:
   application:
     name: multi-agent-system
 
-# Web search configuration (all optional — Bing RSS works with no keys)
-#
-# Option 1: Tavily (best) — https://tavily.com — 1000 free/month
+# ─── Web Search (all optional — Bing RSS works with ZERO keys) ───
+# Set any key to enable that engine. Fallback: Serper → Brave → Tavily → SerpAPI → Google → Bing RSS
+search:
+  serper-api-key: ${SERPER_API_KEY:}       # https://serper.dev — 2500 free queries
+  brave-api-key: ${BRAVE_API_KEY:}         # https://brave.com/search/api — 2000 free/month
+  serpapi-key: ${SERPAPI_KEY:}              # https://serpapi.com — 100 free/month (DuckDuckGo engine)
 tavily:
-  api-key: ${TAVILY_API_KEY:}
-#
-# Option 2: Google Custom Search — 100 free/day
-#   1. Get API key: https://console.cloud.google.com/apis/credentials
-#   2. Create search engine: https://programmablesearchengine.google.com
+  api-key: ${TAVILY_API_KEY:}              # https://tavily.com — 1000 free/month
 google:
   search:
-    api-key: ${GOOGLE_SEARCH_API_KEY:}
-    cx: ${GOOGLE_SEARCH_CX:}
-#
-# Option 3: No keys needed — Bing RSS (default fallback, always works)
+    api-key: ${GOOGLE_SEARCH_API_KEY:}     # https://console.cloud.google.com — 100 free/day
+    cx: ${GOOGLE_SEARCH_CX:}              # https://programmablesearchengine.google.com

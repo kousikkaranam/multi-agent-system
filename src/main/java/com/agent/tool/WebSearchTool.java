@@ -13,34 +13,37 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Map;
 
 /**
  * Web search tool — gives ALL agents real-time internet access.
  *
- * This is the Jarvis capability: any agent can search the internet for
- * real-time data (stocks, news, weather, sports, anything).
+ * 6 search engines with automatic fallback chain:
+ *   1. Serper.dev  (Google results, 2500 free queries)
+ *   2. Brave Search API (2000 free/month, independent index)
+ *   3. Tavily (1000 free/month, AI-optimized)
+ *   4. SerpAPI (100 free/month, supports DuckDuckGo + Google)
+ *   5. Google Custom Search (100 free/day)
+ *   6. Bing RSS (unlimited, no key needed — always-on fallback)
  *
- * Supports two backends:
- * 1. Tavily Search (if TAVILY_API_KEY is set) — best quality, designed for AI
- * 2. DuckDuckGo Instant Answer API (free fallback) — no API key needed
- *
- * Also provides web page fetching to read specific URLs.
+ * Combined free capacity: ~6,700+ searches/month with all keys set.
+ * Works with ZERO config using Bing RSS fallback.
  */
 @Slf4j
 @Component
 public class WebSearchTool {
 
+    @Value("${search.serper-api-key:}")
+    private String serperApiKey;
+
+    @Value("${search.brave-api-key:}")
+    private String braveApiKey;
+
     @Value("${tavily.api-key:}")
     private String tavilyApiKey;
 
-    private final HttpClient httpClient = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(10))
-            .followRedirects(HttpClient.Redirect.NORMAL)
-            .build();
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    @Value("${search.serpapi-key:}")
+    private String serpApiKey;
 
     @Value("${google.search.api-key:}")
     private String googleApiKey;
@@ -48,36 +51,60 @@ public class WebSearchTool {
     @Value("${google.search.cx:}")
     private String googleSearchCx;
 
+    private final HttpClient httpClient = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(10))
+            .followRedirects(HttpClient.Redirect.NORMAL)
+            .build();
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
     /**
-     * Search the web for a query. Returns structured results.
-     *
-     * Priority:
-     * 1. Tavily (if TAVILY_API_KEY set) — best AI-optimized results
-     * 2. Google Custom Search (if GOOGLE_SEARCH_API_KEY + CX set) — 100 free/day
-     * 3. Bing RSS (always free, no key) — reliable fallback
+     * Search the web using the best available engine.
+     * Automatically falls through the chain if one fails.
      */
     public String search(String query) {
         long start = System.currentTimeMillis();
-        try {
-            String result;
-            if (tavilyApiKey != null && !tavilyApiKey.isBlank()) {
-                result = tavilySearch(query);
-            } else if (googleApiKey != null && !googleApiKey.isBlank()
-                    && googleSearchCx != null && !googleSearchCx.isBlank()) {
-                result = googleSearch(query);
-            } else {
-                result = bingRssSearch(query);
+
+        // Try engines in priority order
+        String[][] engines = {
+                {serperApiKey, "Serper"},
+                {braveApiKey, "Brave"},
+                {tavilyApiKey, "Tavily"},
+                {serpApiKey, "SerpAPI"},
+                {googleApiKey, "Google"},
+        };
+
+        for (String[] engine : engines) {
+            if (engine[0] != null && !engine[0].isBlank()) {
+                try {
+                    String result = switch (engine[1]) {
+                        case "Serper" -> serperSearch(query);
+                        case "Brave" -> braveSearch(query);
+                        case "Tavily" -> tavilySearch(query);
+                        case "SerpAPI" -> serpApiSearch(query);
+                        case "Google" -> googleSearch(query);
+                        default -> null;
+                    };
+                    if (result != null && result.length() > 50) {
+                        long elapsed = System.currentTimeMillis() - start;
+                        log.info("[WebSearch] '{}' via {} → {} chars in {}ms",
+                                query, engine[1], result.length(), elapsed);
+                        return result;
+                    }
+                } catch (Exception e) {
+                    log.warn("[WebSearch] {} failed: {}, trying next...", engine[1], e.getMessage());
+                }
             }
+        }
+
+        // Ultimate fallback: Bing RSS (no key needed)
+        try {
+            String result = bingRssSearch(query);
             long elapsed = System.currentTimeMillis() - start;
-            log.info("[WebSearch] '{}' → {} chars in {}ms", query, result.length(), elapsed);
+            log.info("[WebSearch] '{}' via BingRSS → {} chars in {}ms", query, result.length(), elapsed);
             return result;
         } catch (Exception e) {
-            log.error("[WebSearch] Primary search failed, trying fallback: {}", e.getMessage());
-            // Fallback chain
-            try { return bingRssSearch(query); } catch (Exception e2) {
-                log.error("[WebSearch] All search engines failed for '{}': {}", query, e2.getMessage());
-                return "Search failed: " + e.getMessage();
-            }
+            log.error("[WebSearch] All engines failed for '{}': {}", query, e.getMessage());
+            return "Search failed. Please try again.";
         }
     }
 
@@ -97,13 +124,11 @@ public class WebSearchTool {
 
             if (response.statusCode() >= 200 && response.statusCode() < 300) {
                 String body = response.body();
-                // Strip HTML tags for clean text
                 String text = body.replaceAll("<script[^>]*>[\\s\\S]*?</script>", "")
                         .replaceAll("<style[^>]*>[\\s\\S]*?</style>", "")
                         .replaceAll("<[^>]+>", " ")
                         .replaceAll("\\s+", " ")
                         .trim();
-                // Truncate to reasonable size
                 if (text.length() > 8000) {
                     text = text.substring(0, 8000) + "\n... [truncated]";
                 }
@@ -118,15 +143,56 @@ public class WebSearchTool {
         }
     }
 
-    // ─── Google Custom Search (free: 100 searches/day) ───
+    // ─── 1. Serper.dev (Google SERP, 2500 free queries) ───
 
-    private String googleSearch(String query) throws Exception {
+    private String serperSearch(String query) throws Exception {
+        String body = objectMapper.writeValueAsString(Map.of("q", query, "num", 5));
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create("https://google.serper.dev/search"))
+                .header("X-API-KEY", serperApiKey)
+                .header("Content-Type", "application/json")
+                .timeout(Duration.ofSeconds(10))
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build();
+
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        JsonNode root = objectMapper.readTree(response.body());
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("### Search Results (Live — Google)\n\n");
+
+        // Knowledge graph answer
+        if (root.has("answerBox")) {
+            JsonNode box = root.get("answerBox");
+            if (box.has("answer")) sb.append("**Answer:** ").append(box.get("answer").asText()).append("\n\n");
+            else if (box.has("snippet")) sb.append("**Answer:** ").append(box.get("snippet").asText()).append("\n\n");
+        }
+
+        // Organic results
+        JsonNode organic = root.get("organic");
+        if (organic != null && organic.isArray()) {
+            for (int i = 0; i < Math.min(organic.size(), 5); i++) {
+                JsonNode r = organic.get(i);
+                sb.append("**").append(i + 1).append(". ").append(safeText(r, "title")).append("**\n");
+                sb.append(safeText(r, "link")).append("\n");
+                sb.append(safeText(r, "snippet")).append("\n\n");
+            }
+        }
+
+        return sb.toString();
+    }
+
+    // ─── 2. Brave Search API (2000 free/month) ───
+
+    private String braveSearch(String query) throws Exception {
         String encoded = URLEncoder.encode(query, StandardCharsets.UTF_8);
-        String url = "https://www.googleapis.com/customsearch/v1?key=" + googleApiKey
-                + "&cx=" + googleSearchCx + "&q=" + encoded + "&num=5";
+        String url = "https://api.search.brave.com/res/v1/web/search?q=" + encoded + "&count=5";
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
+                .header("X-Subscription-Token", braveApiKey)
+                .header("Accept", "application/json")
                 .timeout(Duration.ofSeconds(10))
                 .GET()
                 .build();
@@ -135,95 +201,22 @@ public class WebSearchTool {
         JsonNode root = objectMapper.readTree(response.body());
 
         StringBuilder sb = new StringBuilder();
-        sb.append("### Google Search Results (Live)\n\n");
+        sb.append("### Search Results (Live — Brave)\n\n");
 
-        JsonNode items = root.get("items");
-        if (items != null && items.isArray()) {
-            for (int i = 0; i < Math.min(items.size(), 5); i++) {
-                JsonNode item = items.get(i);
-                sb.append("**").append(i + 1).append(". ")
-                        .append(item.get("title").asText()).append("**\n");
-                sb.append(item.get("link").asText()).append("\n");
-                if (item.has("snippet")) {
-                    sb.append(item.get("snippet").asText()).append("\n");
-                }
-                sb.append("\n");
+        JsonNode results = root.path("web").path("results");
+        if (results.isArray()) {
+            for (int i = 0; i < Math.min(results.size(), 5); i++) {
+                JsonNode r = results.get(i);
+                sb.append("**").append(i + 1).append(". ").append(safeText(r, "title")).append("**\n");
+                sb.append(safeText(r, "url")).append("\n");
+                sb.append(safeText(r, "description")).append("\n\n");
             }
-        }
-
-        if (sb.length() < 50) {
-            return bingRssSearch(query); // Fallback to Bing if Google returns nothing
         }
 
         return sb.toString();
     }
 
-    // ─── Bing RSS Search (free, no API key, real-time results) ───
-
-    private String bingRssSearch(String query) throws Exception {
-        String encoded = URLEncoder.encode(query, StandardCharsets.UTF_8);
-        String url = "https://www.bing.com/search?format=rss&q=" + encoded + "&count=6";
-
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(url))
-                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                .timeout(Duration.ofSeconds(10))
-                .GET()
-                .build();
-
-        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        String xml = response.body();
-
-        StringBuilder sb = new StringBuilder();
-        sb.append("### Web Search Results (Live)\n\n");
-
-        // Parse RSS XML — extract title, link, description from each <item>
-        String[] items = xml.split("<item>");
-        int count = 0;
-        for (int i = 1; i < items.length && count < 6; i++) {
-            String item = items[i];
-            String title = extractXmlTag(item, "title");
-            String link = extractXmlTag(item, "link");
-            String description = extractXmlTag(item, "description");
-
-            if (title != null && !title.isBlank()) {
-                count++;
-                sb.append("**").append(count).append(". ").append(title).append("**\n");
-                if (link != null) sb.append(link).append("\n");
-                if (description != null && !description.isBlank()) {
-                    // Clean HTML entities
-                    String clean = description
-                            .replaceAll("&amp;", "&")
-                            .replaceAll("&lt;", "<")
-                            .replaceAll("&gt;", ">")
-                            .replaceAll("&#\\d+;", " ")
-                            .replaceAll("<[^>]+>", "")
-                            .trim();
-                    if (clean.length() > 300) clean = clean.substring(0, 300) + "...";
-                    sb.append(clean).append("\n");
-                }
-                sb.append("\n");
-            }
-        }
-
-        if (count == 0) {
-            // Fallback to DuckDuckGo if Bing returns nothing
-            return duckDuckGoSearch(query);
-        }
-
-        return sb.toString();
-    }
-
-    private String extractXmlTag(String xml, String tag) {
-        int start = xml.indexOf("<" + tag + ">");
-        int end = xml.indexOf("</" + tag + ">");
-        if (start >= 0 && end > start) {
-            return xml.substring(start + tag.length() + 2, end).trim();
-        }
-        return null;
-    }
-
-    // ─── Tavily Search (primary — best quality for AI agents) ───
+    // ─── 3. Tavily (1000 free/month, AI-optimized) ───
 
     private String tavilySearch(String query) throws Exception {
         String body = objectMapper.writeValueAsString(Map.of(
@@ -246,40 +239,35 @@ public class WebSearchTool {
 
         StringBuilder sb = new StringBuilder();
 
-        // Tavily's AI-generated answer (concise summary)
         if (root.has("answer") && !root.get("answer").isNull()) {
             sb.append("### AI Summary\n").append(root.get("answer").asText()).append("\n\n");
         }
 
-        // Individual search results
         JsonNode results = root.get("results");
         if (results != null && results.isArray()) {
-            sb.append("### Search Results\n");
+            sb.append("### Search Results (Live — Tavily)\n");
             for (int i = 0; i < Math.min(results.size(), 5); i++) {
                 JsonNode r = results.get(i);
-                sb.append("**").append(i + 1).append(". ").append(r.get("title").asText()).append("**\n");
-                sb.append(r.get("url").asText()).append("\n");
-                if (r.has("content")) {
-                    String content = r.get("content").asText();
-                    if (content.length() > 300) content = content.substring(0, 300) + "...";
-                    sb.append(content).append("\n\n");
-                }
+                sb.append("**").append(i + 1).append(". ").append(safeText(r, "title")).append("**\n");
+                sb.append(safeText(r, "url")).append("\n");
+                String content = safeText(r, "content");
+                if (content.length() > 300) content = content.substring(0, 300) + "...";
+                sb.append(content).append("\n\n");
             }
         }
 
         return sb.toString();
     }
 
-    // ─── DuckDuckGo Search (free fallback — no API key needed) ───
+    // ─── 4. SerpAPI (100 free/month, DuckDuckGo + Google engines) ───
 
-    private String duckDuckGoSearch(String query) throws Exception {
-        // DuckDuckGo Instant Answer API (free, no key)
+    private String serpApiSearch(String query) throws Exception {
         String encoded = URLEncoder.encode(query, StandardCharsets.UTF_8);
-        String url = "https://api.duckduckgo.com/?q=" + encoded + "&format=json&no_html=1&skip_disambig=1";
+        String url = "https://serpapi.com/search.json?engine=duckduckgo&q=" + encoded
+                + "&kl=us-en&api_key=" + serpApiKey;
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
-                .header("User-Agent", "MultiAgentSystem/1.0")
                 .timeout(Duration.ofSeconds(10))
                 .GET()
                 .build();
@@ -288,43 +276,58 @@ public class WebSearchTool {
         JsonNode root = objectMapper.readTree(response.body());
 
         StringBuilder sb = new StringBuilder();
+        sb.append("### Search Results (Live — DuckDuckGo via SerpAPI)\n\n");
 
-        // Abstract (main answer)
-        String abstractText = root.has("Abstract") ? root.get("Abstract").asText() : "";
-        String abstractUrl = root.has("AbstractURL") ? root.get("AbstractURL").asText() : "";
-        if (!abstractText.isBlank()) {
-            sb.append("### Answer\n").append(abstractText).append("\n");
-            if (!abstractUrl.isBlank()) sb.append("Source: ").append(abstractUrl).append("\n\n");
-        }
-
-        // Related topics
-        JsonNode topics = root.get("RelatedTopics");
-        if (topics != null && topics.isArray() && !topics.isEmpty()) {
-            sb.append("### Related Information\n");
-            int count = 0;
-            for (JsonNode topic : topics) {
-                if (topic.has("Text") && count < 5) {
-                    sb.append("- ").append(topic.get("Text").asText()).append("\n");
-                    count++;
-                }
+        JsonNode organic = root.get("organic_results");
+        if (organic != null && organic.isArray()) {
+            for (int i = 0; i < Math.min(organic.size(), 5); i++) {
+                JsonNode r = organic.get(i);
+                sb.append("**").append(i + 1).append(". ").append(safeText(r, "title")).append("**\n");
+                sb.append(safeText(r, "link")).append("\n");
+                sb.append(safeText(r, "snippet")).append("\n\n");
             }
-        }
-
-        // If DuckDuckGo returned nothing useful, do an HTML scrape fallback
-        if (sb.isEmpty()) {
-            sb.append("### Web Search Results\n");
-            sb.append(scrapeSearchResults(query));
         }
 
         return sb.toString();
     }
 
-    /**
-     * Fallback: scrape DuckDuckGo HTML search results when the API returns nothing.
-     */
-    private String scrapeSearchResults(String query) throws Exception {
+    // ─── 5. Google Custom Search (100 free/day) ───
+
+    private String googleSearch(String query) throws Exception {
         String encoded = URLEncoder.encode(query, StandardCharsets.UTF_8);
-        String url = "https://html.duckduckgo.com/html/?q=" + encoded;
+        String url = "https://www.googleapis.com/customsearch/v1?key=" + googleApiKey
+                + "&cx=" + googleSearchCx + "&q=" + encoded + "&num=5";
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .timeout(Duration.ofSeconds(10))
+                .GET()
+                .build();
+
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        JsonNode root = objectMapper.readTree(response.body());
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("### Search Results (Live — Google)\n\n");
+
+        JsonNode items = root.get("items");
+        if (items != null && items.isArray()) {
+            for (int i = 0; i < Math.min(items.size(), 5); i++) {
+                JsonNode item = items.get(i);
+                sb.append("**").append(i + 1).append(". ").append(safeText(item, "title")).append("**\n");
+                sb.append(safeText(item, "link")).append("\n");
+                sb.append(safeText(item, "snippet")).append("\n\n");
+            }
+        }
+
+        return sb.toString();
+    }
+
+    // ─── 6. Bing RSS (unlimited, no key — always-on fallback) ───
+
+    private String bingRssSearch(String query) throws Exception {
+        String encoded = URLEncoder.encode(query, StandardCharsets.UTF_8);
+        String url = "https://www.bing.com/search?format=rss&q=" + encoded + "&count=6";
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
@@ -334,33 +337,50 @@ public class WebSearchTool {
                 .build();
 
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        String html = response.body();
+        String xml = response.body();
 
-        // Extract result snippets from DuckDuckGo HTML
-        List<String> results = new ArrayList<>();
-        String[] parts = html.split("class=\"result__snippet\"");
-        for (int i = 1; i < Math.min(parts.length, 6); i++) {
-            String snippet = parts[i];
-            int endIdx = snippet.indexOf("</a>");
-            if (endIdx > 0) {
-                String text = snippet.substring(0, endIdx)
-                        .replaceAll("<[^>]+>", "")
-                        .replaceAll("\\s+", " ")
-                        .trim();
-                if (!text.isBlank() && text.length() > 20) {
-                    results.add(text);
+        StringBuilder sb = new StringBuilder();
+        sb.append("### Search Results (Live — Bing)\n\n");
+
+        String[] items = xml.split("<item>");
+        int count = 0;
+        for (int i = 1; i < items.length && count < 6; i++) {
+            String item = items[i];
+            String title = extractXmlTag(item, "title");
+            String link = extractXmlTag(item, "link");
+            String description = extractXmlTag(item, "description");
+
+            if (title != null && !title.isBlank()) {
+                count++;
+                sb.append("**").append(count).append(". ").append(title).append("**\n");
+                if (link != null) sb.append(link).append("\n");
+                if (description != null && !description.isBlank()) {
+                    String clean = description
+                            .replaceAll("&amp;", "&").replaceAll("&lt;", "<")
+                            .replaceAll("&gt;", ">").replaceAll("&#\\d+;", " ")
+                            .replaceAll("<[^>]+>", "").trim();
+                    if (clean.length() > 300) clean = clean.substring(0, 300) + "...";
+                    sb.append(clean).append("\n");
                 }
+                sb.append("\n");
             }
         }
 
-        if (results.isEmpty()) {
-            return "No results found. Try a more specific query.";
-        }
-
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < results.size(); i++) {
-            sb.append(i + 1).append(". ").append(results.get(i)).append("\n\n");
-        }
         return sb.toString();
+    }
+
+    // ─── Utilities ───
+
+    private String extractXmlTag(String xml, String tag) {
+        int start = xml.indexOf("<" + tag + ">");
+        int end = xml.indexOf("</" + tag + ">");
+        if (start >= 0 && end > start) {
+            return xml.substring(start + tag.length() + 2, end).trim();
+        }
+        return null;
+    }
+
+    private String safeText(JsonNode node, String field) {
+        return node.has(field) && !node.get(field).isNull() ? node.get(field).asText() : "";
     }
 }

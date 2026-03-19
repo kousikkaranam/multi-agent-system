@@ -30,6 +30,14 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-validation'
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
 
+    // LangChain4j — LLM abstraction layer (Ollama, OpenAI, Gemini, etc.)
+    implementation 'dev.langchain4j:langchain4j:1.12.2'
+    implementation 'dev.langchain4j:langchain4j-ollama:1.12.2'
+
+    // Google ADK — Agent orchestration framework
+    implementation 'com.google.adk:google-adk:0.9.0'
+    implementation 'com.google.adk:google-adk-contrib-langchain4j:0.2.0'
+
     // JSON
     implementation 'com.fasterxml.jackson.core:jackson-databind'
 

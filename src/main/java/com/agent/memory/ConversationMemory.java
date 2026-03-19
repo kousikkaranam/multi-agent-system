@@ -1,6 +1,11 @@
 package com.agent.memory;
 
 import com.agent.model.ChatMessage;
+import dev.langchain4j.data.message.AiMessage;
+import dev.langchain4j.data.message.SystemMessage;
+import dev.langchain4j.data.message.UserMessage;
+import dev.langchain4j.memory.ChatMemory;
+import dev.langchain4j.memory.chat.MessageWindowChatMemory;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -13,12 +18,11 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Optimized conversation memory with:
+ * Conversation memory backed by LangChain4j's MessageWindowChatMemory.
  *
- * 1. SMART WINDOWING — keep last 10 messages, compress older ones
- * 2. TTL EVICTION — conversations expire after 30 min of inactivity
- * 3. TOKEN-AWARE TRIMMING — cap individual message length
- * 4. THREAD-SAFE — ConcurrentHashMap + atomic operations
+ * LangChain4j handles: message windowing (keeps last N messages automatically).
+ * We handle: TTL eviction (LangChain4j doesn't expire conversations),
+ *            message length trimming, and conversion to our ChatMessage format.
  */
 @Slf4j
 @Service
@@ -45,7 +49,18 @@ public class ConversationMemory {
         ConversationState state = store.get(conversationId);
         if (state == null) return Collections.emptyList();
         state.touchedAt = Instant.now();
-        return Collections.unmodifiableList(state.messages);
+
+        // Convert LangChain4j messages back to our format
+        List<ChatMessage> result = new ArrayList<>();
+        for (var msg : state.memory.messages()) {
+            switch (msg) {
+                case SystemMessage sm -> result.add(new ChatMessage("system", sm.text()));
+                case UserMessage um -> result.add(new ChatMessage("user", um.singleText()));
+                case AiMessage am -> result.add(new ChatMessage("assistant", am.text()));
+                default -> {} // skip unknown types
+            }
+        }
+        return Collections.unmodifiableList(result);
     }
 
     public void addMessage(String conversationId, String role, String content) {
@@ -56,12 +71,20 @@ public class ConversationMemory {
                 : content;
 
         store.compute(conversationId, (key, state) -> {
-            if (state == null) state = new ConversationState();
-            state.messages.add(new ChatMessage(role, trimmed));
+            if (state == null) {
+                state = new ConversationState(
+                        MessageWindowChatMemory.builder()
+                                .maxMessages(MAX_RECENT_MESSAGES)
+                                .build()
+                );
+            }
             state.touchedAt = Instant.now();
 
-            if (state.messages.size() > MAX_RECENT_MESSAGES * 2) {
-                compressOldMessages(state);
+            // Add to LangChain4j memory (auto-windows to last N messages)
+            switch (role) {
+                case "system" -> state.memory.add(SystemMessage.from(trimmed));
+                case "assistant" -> state.memory.add(AiMessage.from(trimmed));
+                default -> state.memory.add(UserMessage.from(trimmed));
             }
             return state;
         });
@@ -75,31 +98,6 @@ public class ConversationMemory {
         return store.size();
     }
 
-    private void compressOldMessages(ConversationState state) {
-        int total = state.messages.size();
-        if (total <= MAX_RECENT_MESSAGES) return;
-
-        int compressCount = total - MAX_RECENT_MESSAGES;
-        List<ChatMessage> toCompress = new ArrayList<>(state.messages.subList(0, compressCount));
-        List<ChatMessage> toKeep = new ArrayList<>(state.messages.subList(compressCount, total));
-
-        StringBuilder summary = new StringBuilder("[Earlier: ");
-        int count = 0;
-        for (ChatMessage msg : toCompress) {
-            if ("user".equals(msg.getRole())) {
-                String text = msg.getContent();
-                if (text.length() > 60) text = text.substring(0, 60) + "...";
-                summary.append("'").append(text).append("' → ");
-                if (++count >= 4) break;
-            }
-        }
-        summary.append("and more]");
-
-        state.messages.clear();
-        state.messages.add(new ChatMessage("system", summary.toString()));
-        state.messages.addAll(toKeep);
-    }
-
     private void evictExpired() {
         Instant cutoff = Instant.now().minus(CONVERSATION_TTL);
         int before = store.size();
@@ -109,7 +107,11 @@ public class ConversationMemory {
     }
 
     private static class ConversationState {
-        final List<ChatMessage> messages = new ArrayList<>();
+        final ChatMemory memory;
         volatile Instant touchedAt = Instant.now();
+
+        ConversationState(ChatMemory memory) {
+            this.memory = memory;
+        }
     }
 }

@@ -94,11 +94,9 @@ public class ContextGatherer {
             "(?i)(?:architect|structure|organiz|layer|design|pattern|module|package|component|folder)\\s*" +
             "(?:of|in|for)?");
 
-    /** Queries that need REAL-TIME data from the internet */
-    private static final Pattern REALTIME_DATA = Pattern.compile(
-            "(?i)(?:current|latest|today|now|right now|live|recent|trending|top|best|" +
-            "stock|price|weather|news|score|match|rate|forecast|market|nifty|sensex|" +
-            "crypto|bitcoin|gold price|dollar|rupee|election|result|update)");
+    /** No pattern needed — web search runs on EVERY query.
+     *  Bing RSS is unlimited and free. Better to always have real data
+     *  than try to guess which queries need it and miss. */
 
     /**
      * Gather context for a query BEFORE the LLM runs.
@@ -114,11 +112,9 @@ public class ContextGatherer {
             // Determine what context is needed based on query patterns
             List<CompletableFuture<String>> contextFutures = new ArrayList<>();
 
-            // Web search runs ALWAYS — regardless of workspace connection.
-            // This is what gives the system real-time knowledge (stocks, news, weather, etc.)
-            if (REALTIME_DATA.matcher(input).find()) {
-                contextFutures.add(searchWeb(input));
-            }
+            // Web search runs on EVERY query — Bing RSS is unlimited and free.
+            // This is what makes the system Jarvis-like: always has real-time knowledge.
+            contextFutures.add(searchWeb(input));
 
             // Workspace-dependent context only if connected
             if (!workspaceConnected) {
@@ -214,12 +210,6 @@ public class ContextGatherer {
             // 9. RESEARCH agent with workspace but no context gathered → gather overview as fallback
             if (agentType == AgentType.RESEARCH && contextFutures.isEmpty()) {
                 contextFutures.add(gatherProjectOverview());
-            }
-
-            // 10. Real-time data queries — already handled above (runs regardless of workspace)
-            // Add web search here too for workspace-connected queries that also need live data
-            if (REALTIME_DATA.matcher(input).find()) {
-                contextFutures.add(searchWeb(input));
             }
 
             // Execute all context gathering in parallel, with timeout

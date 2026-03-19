@@ -38,6 +38,7 @@ public class ToolExecutor {
 
     private final WorkspaceService workspaceService;
     private final TerminalService terminalService;
+    private final WebSearchTool webSearchTool;
     private final ExecutorService virtualThreadExecutor;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -88,6 +89,8 @@ public class ToolExecutor {
             | listFiles | Get workspace file tree | <tool_call>{"tool": "listFiles", "args": {}}</tool_call> |
             | searchFiles | Search text in files | <tool_call>{"tool": "searchFiles", "args": {"query": "TODO", "pattern": "**/*.java"}}</tool_call> |
             | runCommand | Run terminal command | <tool_call>{"tool": "runCommand", "args": {"command": "mvn test", "reason": "Run tests"}}</tool_call> |
+            | webSearch | Search the internet for real-time info | <tool_call>{"tool": "webSearch", "args": {"query": "top stocks India March 2026"}}</tool_call> |
+            | webFetch | Fetch and read a web page | <tool_call>{"tool": "webFetch", "args": {"url": "https://example.com/article"}}</tool_call> |
 
             CRITICAL RULES:
             - ALWAYS use tools to get real data. NEVER guess or make up file contents.
@@ -272,6 +275,16 @@ public class ToolExecutor {
                             args.has("reason") ? args.get("reason").asText() : "Agent requested");
                     yield new ToolResult(toolName, true,
                             "Command proposed (id: " + commandId + "). Waiting for user approval.", null);
+                }
+                case "webSearch" -> {
+                    String searchQuery = args.get("query").asText();
+                    String searchResult = webSearchTool.search(searchQuery);
+                    yield new ToolResult(toolName, true, searchResult, null);
+                }
+                case "webFetch" -> {
+                    String fetchUrl = args.get("url").asText();
+                    String pageContent = webSearchTool.fetchUrl(fetchUrl);
+                    yield new ToolResult(toolName, true, pageContent, null);
                 }
                 default -> new ToolResult(toolName, false, null, "Unknown tool: " + toolName);
             };

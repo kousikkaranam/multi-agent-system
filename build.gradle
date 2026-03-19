@@ -38,6 +38,9 @@ dependencies {
     implementation 'com.google.adk:google-adk:0.9.0'
     implementation 'com.google.adk:google-adk-contrib-langchain4j:0.2.0'
 
+    // Web Search — gives agents real-time internet access
+    implementation 'dev.langchain4j:langchain4j-web-search-engine-tavily:1.12.2-beta22'
+
     // JSON
     implementation 'com.fasterxml.jackson.core:jackson-databind'
 

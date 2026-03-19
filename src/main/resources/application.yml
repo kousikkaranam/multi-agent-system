@@ -10,3 +10,8 @@ ollama:
 spring:
   application:
     name: multi-agent-system
+
+# Web search — get a free key at https://tavily.com (1000 searches/month)
+# Without this, DuckDuckGo is used as free fallback (no key needed)
+tavily:
+  api-key: ${TAVILY_API_KEY:}

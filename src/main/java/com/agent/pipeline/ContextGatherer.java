@@ -1,6 +1,7 @@
 package com.agent.pipeline;
 
 import com.agent.model.AgentType;
+import com.agent.tool.WebSearchTool;
 import com.agent.workspace.WorkspaceService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -44,6 +45,7 @@ import java.util.regex.Pattern;
 public class ContextGatherer {
 
     private final WorkspaceService workspaceService;
+    private final WebSearchTool webSearchTool;
     private final ExecutorService virtualThreadExecutor;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -91,6 +93,12 @@ public class ContextGatherer {
     private static final Pattern ARCHITECTURE_QUERY = Pattern.compile(
             "(?i)(?:architect|structure|organiz|layer|design|pattern|module|package|component|folder)\\s*" +
             "(?:of|in|for)?");
+
+    /** Queries that need REAL-TIME data from the internet */
+    private static final Pattern REALTIME_DATA = Pattern.compile(
+            "(?i)(?:current|latest|today|now|right now|live|recent|trending|top|best|" +
+            "stock|price|weather|news|score|match|rate|forecast|market|nifty|sensex|" +
+            "crypto|bitcoin|gold price|dollar|rupee|election|result|update)");
 
     /**
      * Gather context for a query BEFORE the LLM runs.
@@ -182,9 +190,14 @@ public class ContextGatherer {
                 contextFutures.add(gatherProjectOverview());
             }
 
+            // 10. Real-time data queries → search the internet AUTOMATICALLY
+            if (REALTIME_DATA.matcher(input).find()) {
+                contextFutures.add(searchWeb(input));
+            }
+
             // Execute all context gathering in parallel, with timeout
             if (!contextFutures.isEmpty()) {
-                context.append("\n\n## WORKSPACE CONTEXT (Real data — base your answer on this)\n\n");
+                context.append("\n\n## CONTEXT (Real data — base your answer on this)\n\n");
 
                 CompletableFuture<Void> allDone = CompletableFuture.allOf(
                         contextFutures.toArray(new CompletableFuture[0]));
@@ -429,6 +442,24 @@ public class ContextGatherer {
             }
 
             return sb.toString();
+        }, virtualThreadExecutor);
+    }
+
+    /**
+     * Search the web for real-time information.
+     * This is what makes the system "Jarvis-like" — internet access for any query.
+     */
+    private CompletableFuture<String> searchWeb(String query) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                String results = webSearchTool.search(query);
+                if (results != null && !results.isBlank()) {
+                    return "### Web Search Results (Live Data)\n" + results + "\n";
+                }
+            } catch (Exception e) {
+                log.debug("Web search failed: {}", e.getMessage());
+            }
+            return "";
         }, virtualThreadExecutor);
     }
 

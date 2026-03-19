@@ -13,7 +13,9 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.Map;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.function.Supplier;
 
 /**
  * Web search tool — gives ALL agents real-time internet access.
@@ -57,54 +59,268 @@ public class WebSearchTool {
             .build();
     private final ObjectMapper objectMapper = new ObjectMapper();
 
+    private final ExecutorService searchExecutor = Executors.newVirtualThreadPerTaskExecutor();
+
+    // Minimum engines to wait for before merging (if more are configured)
+    private static final int MIN_RESULTS_BEFORE_MERGE = 2;
+    // Max wait time for all engines
+    private static final long MAX_WAIT_MS = 8_000;
+    // After first result arrives, wait this long for more before merging
+    private static final long GRACE_PERIOD_MS = 3_000;
+
     /**
-     * Search the web using the best available engine.
-     * Automatically falls through the chain if one fails.
+     * Parallel multi-engine search with result merging.
+     *
+     * Strategy:
+     * 1. Fire ALL configured engines simultaneously on virtual threads
+     * 2. Collect results as they arrive (fastest first via CompletionService)
+     * 3. Wait until: enough engines respond OR timeout
+     * 4. MERGE all results: deduplicate by URL, rank by cross-engine agreement
+     * 5. Return one comprehensive, accurate result
+     *
+     * If 3/6 engines return the same article → high confidence.
+     * Unique results from different engines → broader coverage.
      */
     public String search(String query) {
         long start = System.currentTimeMillis();
 
-        // Try engines in priority order
-        String[][] engines = {
-                {serperApiKey, "Serper"},
-                {braveApiKey, "Brave"},
-                {tavilyApiKey, "Tavily"},
-                {serpApiKey, "SerpAPI"},
-                {googleApiKey, "Google"},
-        };
+        // Build list of configured engines
+        record SearchTask(String name, Callable<SearchResult> task) {}
 
-        for (String[] engine : engines) {
-            if (engine[0] != null && !engine[0].isBlank()) {
-                try {
-                    String result = switch (engine[1]) {
-                        case "Serper" -> serperSearch(query);
-                        case "Brave" -> braveSearch(query);
-                        case "Tavily" -> tavilySearch(query);
-                        case "SerpAPI" -> serpApiSearch(query);
-                        case "Google" -> googleSearch(query);
-                        default -> null;
-                    };
-                    if (result != null && result.length() > 50) {
-                        long elapsed = System.currentTimeMillis() - start;
-                        log.info("[WebSearch] '{}' via {} → {} chars in {}ms",
-                                query, engine[1], result.length(), elapsed);
-                        return result;
+        List<SearchTask> tasks = new ArrayList<>();
+        if (isSet(serperApiKey))  tasks.add(new SearchTask("Serper",  () -> parseResults("Serper", serperSearch(query))));
+        if (isSet(braveApiKey))   tasks.add(new SearchTask("Brave",   () -> parseResults("Brave", braveSearch(query))));
+        if (isSet(tavilyApiKey))  tasks.add(new SearchTask("Tavily",  () -> parseResults("Tavily", tavilySearch(query))));
+        if (isSet(serpApiKey))    tasks.add(new SearchTask("SerpAPI", () -> parseResults("SerpAPI", serpApiSearch(query))));
+        if (isSet(googleApiKey) && isSet(googleSearchCx))
+                                  tasks.add(new SearchTask("Google",  () -> parseResults("Google", googleSearch(query))));
+        // Bing RSS always runs — guaranteed fallback
+        tasks.add(new SearchTask("BingRSS", () -> parseResults("BingRSS", bingRssSearch(query))));
+
+        int totalEngines = tasks.size();
+        log.info("[WebSearch] Firing {} engines in parallel for: '{}'", totalEngines,
+                query.length() > 60 ? query.substring(0, 60) + "..." : query);
+
+        // Fire all engines and use CompletionService to get results as they complete
+        CompletionService<SearchResult> completionService =
+                new ExecutorCompletionService<>(searchExecutor);
+
+        for (SearchTask task : tasks) {
+            completionService.submit(task.task());
+        }
+
+        // Collect results as they arrive
+        List<SearchResult> collectedResults = new ArrayList<>();
+        List<String> respondedEngines = new ArrayList<>();
+        long deadline = start + MAX_WAIT_MS;
+        long graceDeadline = 0; // Set after first result arrives
+
+        for (int i = 0; i < totalEngines; i++) {
+            long remaining = deadline - System.currentTimeMillis();
+            if (remaining <= 0) break;
+
+            // After first result, apply grace period for more results
+            if (!collectedResults.isEmpty() && graceDeadline > 0) {
+                remaining = Math.min(remaining, graceDeadline - System.currentTimeMillis());
+                if (remaining <= 0) break;
+            }
+
+            try {
+                Future<SearchResult> future = completionService.poll(remaining, TimeUnit.MILLISECONDS);
+                if (future == null) break; // Timeout
+
+                SearchResult result = future.get();
+                if (result != null && !result.entries.isEmpty()) {
+                    collectedResults.add(result);
+                    respondedEngines.add(result.engine);
+                    log.debug("[WebSearch] {} returned {} entries in {}ms",
+                            result.engine, result.entries.size(),
+                            System.currentTimeMillis() - start);
+
+                    // Set grace deadline after first result
+                    if (graceDeadline == 0) {
+                        graceDeadline = System.currentTimeMillis() + GRACE_PERIOD_MS;
                     }
-                } catch (Exception e) {
-                    log.warn("[WebSearch] {} failed: {}, trying next...", engine[1], e.getMessage());
+
+                    // If we have enough results and multiple engines agree, stop waiting
+                    if (collectedResults.size() >= MIN_RESULTS_BEFORE_MERGE
+                            && collectedResults.size() >= Math.min(3, totalEngines)) {
+                        break;
+                    }
+                }
+            } catch (Exception e) {
+                // Engine failed — continue collecting from others
+            }
+        }
+
+        long elapsed = System.currentTimeMillis() - start;
+
+        if (collectedResults.isEmpty()) {
+            log.error("[WebSearch] All {} engines failed for '{}' in {}ms", totalEngines, query, elapsed);
+            return "Search failed. Please try again.";
+        }
+
+        // MERGE results from all engines
+        String merged = mergeResults(collectedResults);
+        log.info("[WebSearch] '{}' → merged from {} engines [{}] in {}ms",
+                query.length() > 40 ? query.substring(0, 40) + "..." : query,
+                respondedEngines.size(), String.join(", ", respondedEngines), elapsed);
+
+        return merged;
+    }
+
+    // ─── Result Merging (the accuracy engine) ───
+
+    /**
+     * Merge results from multiple search engines into one comprehensive answer.
+     * - Deduplicates by URL (same page from different engines = high confidence)
+     * - Ranks entries: appeared in more engines = shown first
+     * - Keeps unique entries from each engine for broader coverage
+     */
+    private String mergeResults(List<SearchResult> results) {
+        // Track entries by normalized URL → entry with cross-engine count
+        Map<String, MergedEntry> urlMap = new LinkedHashMap<>();
+        List<MergedEntry> noUrlEntries = new ArrayList<>();
+
+        for (SearchResult sr : results) {
+            for (SearchEntry entry : sr.entries) {
+                String key = normalizeUrl(entry.url);
+                if (key != null && !key.isBlank()) {
+                    urlMap.compute(key, (k, existing) -> {
+                        if (existing == null) {
+                            return new MergedEntry(entry.title, entry.url, entry.snippet, 1, sr.engine);
+                        }
+                        existing.engineCount++;
+                        existing.engines += ", " + sr.engine;
+                        // Keep longer snippet (more informative)
+                        if (entry.snippet != null && entry.snippet.length() > existing.snippet.length()) {
+                            existing.snippet = entry.snippet;
+                        }
+                        return existing;
+                    });
+                } else if (entry.title != null && !entry.title.isBlank()) {
+                    // AI summaries or entries without URLs
+                    noUrlEntries.add(new MergedEntry(entry.title, "", entry.snippet, 1, sr.engine));
                 }
             }
         }
 
-        // Ultimate fallback: Bing RSS (no key needed)
-        try {
-            String result = bingRssSearch(query);
-            long elapsed = System.currentTimeMillis() - start;
-            log.info("[WebSearch] '{}' via BingRSS → {} chars in {}ms", query, result.length(), elapsed);
-            return result;
-        } catch (Exception e) {
-            log.error("[WebSearch] All engines failed for '{}': {}", query, e.getMessage());
-            return "Search failed. Please try again.";
+        // Sort: entries appearing in MORE engines rank higher (cross-validated = accurate)
+        List<MergedEntry> sorted = new ArrayList<>(urlMap.values());
+        sorted.sort((a, b) -> {
+            if (b.engineCount != a.engineCount) return b.engineCount - a.engineCount;
+            return b.snippet.length() - a.snippet.length(); // Longer snippet = more info
+        });
+
+        // Build final output
+        StringBuilder sb = new StringBuilder();
+        sb.append("### Web Search Results (Live — ").append(results.size()).append(" sources)\n\n");
+
+        // AI summaries first (if any engine provided one)
+        for (MergedEntry entry : noUrlEntries) {
+            if (entry.snippet != null && entry.snippet.length() > 50) {
+                sb.append("**Summary:** ").append(entry.snippet).append("\n\n");
+                break; // Only one summary
+            }
+        }
+
+        // Ranked results
+        int count = 0;
+        for (MergedEntry entry : sorted) {
+            if (count >= 8) break; // Cap at 8 results
+            count++;
+            sb.append("**").append(count).append(". ").append(entry.title).append("**");
+            if (entry.engineCount > 1) {
+                sb.append(" (").append(entry.engineCount).append(" sources)");
+            }
+            sb.append("\n");
+            if (entry.url != null && !entry.url.isBlank()) {
+                sb.append(entry.url).append("\n");
+            }
+            if (entry.snippet != null && !entry.snippet.isBlank()) {
+                String snippet = entry.snippet.length() > 400
+                        ? entry.snippet.substring(0, 400) + "..." : entry.snippet;
+                sb.append(snippet).append("\n");
+            }
+            sb.append("\n");
+        }
+
+        return sb.toString();
+    }
+
+    /**
+     * Parse raw engine output into structured SearchResult for merging.
+     */
+    private SearchResult parseResults(String engine, String rawOutput) {
+        List<SearchEntry> entries = new ArrayList<>();
+        if (rawOutput == null || rawOutput.isBlank()) return new SearchResult(engine, entries);
+
+        // Parse the markdown-formatted results into structured entries
+        String[] lines = rawOutput.split("\n");
+        String currentTitle = null;
+        String currentUrl = null;
+        StringBuilder currentSnippet = new StringBuilder();
+
+        for (String line : lines) {
+            line = line.trim();
+            if (line.startsWith("**") && line.contains(".")) {
+                // Save previous entry
+                if (currentTitle != null) {
+                    entries.add(new SearchEntry(currentTitle, currentUrl, currentSnippet.toString().trim()));
+                }
+                // New entry: "**1. Title**" or "**Answer:** text"
+                currentTitle = line.replaceAll("\\*\\*", "").replaceAll("^\\d+\\.\\s*", "").trim();
+                if (currentTitle.endsWith("(") || currentTitle.isEmpty()) currentTitle = null;
+                currentUrl = null;
+                currentSnippet = new StringBuilder();
+            } else if (line.startsWith("**Summary:**") || line.startsWith("**Answer:**")) {
+                String summary = line.replaceAll("\\*\\*[^*]+\\*\\*\\s*", "").trim();
+                entries.add(new SearchEntry("AI Summary", "", summary));
+            } else if (line.startsWith("http://") || line.startsWith("https://")) {
+                currentUrl = line.trim();
+            } else if (!line.startsWith("###") && !line.isBlank() && currentTitle != null) {
+                if (currentSnippet.length() > 0) currentSnippet.append(" ");
+                currentSnippet.append(line);
+            }
+        }
+        // Save last entry
+        if (currentTitle != null) {
+            entries.add(new SearchEntry(currentTitle, currentUrl, currentSnippet.toString().trim()));
+        }
+
+        return new SearchResult(engine, entries);
+    }
+
+    private String normalizeUrl(String url) {
+        if (url == null || url.isBlank()) return null;
+        return url.toLowerCase()
+                .replaceAll("^https?://", "")
+                .replaceAll("^www\\.", "")
+                .replaceAll("/+$", "");
+    }
+
+    private boolean isSet(String value) {
+        return value != null && !value.isBlank();
+    }
+
+    // ─── Data structures for merging ───
+
+    record SearchEntry(String title, String url, String snippet) {}
+    record SearchResult(String engine, List<SearchEntry> entries) {}
+
+    static class MergedEntry {
+        String title;
+        String url;
+        String snippet;
+        int engineCount;
+        String engines;
+
+        MergedEntry(String title, String url, String snippet, int engineCount, String engine) {
+            this.title = title;
+            this.url = url;
+            this.snippet = snippet != null ? snippet : "";
+            this.engineCount = engineCount;
+            this.engines = engine;
         }
     }
 

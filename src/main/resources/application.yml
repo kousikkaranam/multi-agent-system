@@ -23,3 +23,11 @@ google:
   search:
     api-key: ${GOOGLE_SEARCH_API_KEY:}     # https://console.cloud.google.com — 100 free/day
     cx: ${GOOGLE_SEARCH_CX:}              # https://programmablesearchengine.google.com
+
+#
+#  Serper.dev  (2,500 free) ──→ Google results, best quality
+#  Brave       (2,000 free) ──→ Independent index, privacy-focused
+#  Tavily      (1,000 free) ──→ AI-optimized with summaries
+#  SerpAPI       (100 free) ──→ DuckDuckGo via proper API
+#  Google CSE    (100/day)  ──→ Official Google results
+#  Bing RSS    (unlimited)  ──→ No key needed, always works

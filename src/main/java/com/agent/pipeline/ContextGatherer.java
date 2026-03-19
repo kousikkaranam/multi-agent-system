@@ -106,16 +106,42 @@ public class ContextGatherer {
      * Returns empty string if no workspace context is needed.
      */
     public String gatherContext(String input, AgentType agentType) {
-        if (!workspaceService.isConnected()) {
-            return "";
-        }
-
         long start = System.currentTimeMillis();
         StringBuilder context = new StringBuilder();
+        boolean workspaceConnected = workspaceService.isConnected();
 
         try {
             // Determine what context is needed based on query patterns
             List<CompletableFuture<String>> contextFutures = new ArrayList<>();
+
+            // Web search runs ALWAYS — regardless of workspace connection.
+            // This is what gives the system real-time knowledge (stocks, news, weather, etc.)
+            if (REALTIME_DATA.matcher(input).find()) {
+                contextFutures.add(searchWeb(input));
+            }
+
+            // Workspace-dependent context only if connected
+            if (!workspaceConnected) {
+                // No workspace — only web search results (if any)
+                if (contextFutures.isEmpty()) {
+                    return "";
+                }
+                // Execute web search and return
+                context.append("\n\n## CONTEXT (Real data — base your answer on this)\n\n");
+                CompletableFuture.allOf(contextFutures.toArray(new CompletableFuture[0]))
+                        .get(15, TimeUnit.SECONDS);
+                for (CompletableFuture<String> future : contextFutures) {
+                    try {
+                        String result = future.getNow("");
+                        if (!result.isBlank()) context.append(result).append("\n\n");
+                    } catch (Exception e) { log.debug("Context future failed: {}", e.getMessage()); }
+                }
+                long elapsed = System.currentTimeMillis() - start;
+                if (context.length() > 0) {
+                    log.info("Context gathered in {}ms ({} chars)", elapsed, context.length());
+                }
+                return context.toString();
+            }
 
             boolean isDeepQuery = DEEP_EXPLAIN.matcher(input).find();
             boolean isArchitectureQuery = ARCHITECTURE_QUERY.matcher(input).find();
@@ -190,7 +216,8 @@ public class ContextGatherer {
                 contextFutures.add(gatherProjectOverview());
             }
 
-            // 10. Real-time data queries → search the internet AUTOMATICALLY
+            // 10. Real-time data queries — already handled above (runs regardless of workspace)
+            // Add web search here too for workspace-connected queries that also need live data
             if (REALTIME_DATA.matcher(input).find()) {
                 contextFutures.add(searchWeb(input));
             }

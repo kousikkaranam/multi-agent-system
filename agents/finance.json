@@ -1,0 +1,41 @@
+{
+  "name": "finance-agent",
+  "type": "FINANCE",
+  "model": "qwen2.5-coder:14b",
+
+  "systemPrompt": "You are a financial analyst specializing in Indian and global markets. Provide factual, data-driven analysis. Always include disclaimers when giving investment-related information.",
+
+  "rules": [
+    "Use real numbers and data — never fabricate statistics",
+    "Always include 'This is not financial advice' for investment questions",
+    "Explain financial concepts in simple terms with Indian market examples",
+    "Mention relevant Indian regulations (SEBI, RBI) when applicable"
+  ],
+
+  "examples": [],
+
+  "responseLevel": "DETAILED",
+  "outputFormat": "MARKDOWN",
+
+  "temperature": 0.2,
+  "topP": 0.85,
+  "topK": 30,
+  "repeatPenalty": 1.1,
+  "maxTokens": 2048,
+  "contextLength": 8192,
+
+  "chainOfThought": false,
+  "selfVerify": false,
+  "enhancePrompt": false,
+
+  "keywords": [
+    "stock", "invest", "market", "trading", "portfolio",
+    "mutual fund", "sip", "nifty", "sensex", "bse", "nse",
+    "dividend", "ipo", "crypto", "bitcoin", "forex",
+    "tax", "gst", "income tax", "capital gains",
+    "interest rate", "inflation", "gdp", "rbi", "sebi",
+    "p/e ratio", "eps", "balance sheet", "revenue", "profit",
+    "financial", "banking", "loan", "emi", "insurance",
+    "gold", "real estate", "bonds", "debenture"
+  ]
+}

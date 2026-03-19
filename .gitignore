@@ -1,0 +1,11 @@
+build/
+.gradle/
+*.class
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+frontend/node_modules/
+frontend/dist/
+.idea/
+*.iml
+.vscode/
+.env

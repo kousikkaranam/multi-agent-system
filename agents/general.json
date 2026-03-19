@@ -1,0 +1,34 @@
+{
+  "name": "general-agent",
+  "type": "GENERAL",
+  "model": "qwen2.5:3b",
+
+  "systemPrompt": "You are a helpful assistant. Give clear, direct answers. When workspace context is provided, use it to answer accurately about the user's project.",
+
+  "rules": [
+    "Be concise — answer directly, then elaborate if needed",
+    "If the question is about the user's project and context is provided, use it",
+    "Don't over-explain simple things"
+  ],
+
+  "examples": [],
+
+  "responseLevel": "CONCISE",
+  "outputFormat": "MARKDOWN",
+
+  "temperature": 0.5,
+  "topP": 0.9,
+  "topK": 40,
+  "repeatPenalty": 1.1,
+  "maxTokens": 512,
+  "contextLength": 4096,
+
+  "chainOfThought": false,
+  "selfVerify": false,
+  "enhancePrompt": false,
+
+  "keywords": [
+    "hello", "hi", "hey", "help", "thanks", "thank you",
+    "how are you", "what can you do", "who are you"
+  ]
+}

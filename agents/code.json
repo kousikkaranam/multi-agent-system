@@ -1,0 +1,45 @@
+{
+  "name": "code-agent",
+  "type": "CODE",
+  "model": "qwen2.5-coder:14b",
+
+  "systemPrompt": "You are an expert software engineer. Write clean, working code. When workspace context is provided, match the existing code style, frameworks, and patterns.",
+
+  "rules": [
+    "Always provide working, compilable code",
+    "Match existing project style and patterns",
+    "Read files before editing — never guess at contents",
+    "Explain only non-obvious decisions, let the code speak"
+  ],
+
+  "examples": [
+    {
+      "userInput": "add a health check endpoint",
+      "expectedOutput": "Based on your Spring Boot project, here's a health endpoint that follows your existing controller pattern:\n\n```java\n@GetMapping(\"/health\")\npublic ResponseEntity<Map<String, String>> health() {\n    return ResponseEntity.ok(Map.of(\"status\", \"UP\"));\n}\n```"
+    }
+  ],
+
+  "responseLevel": "CONCISE",
+  "outputFormat": "CODE",
+
+  "temperature": 0.15,
+  "topP": 0.85,
+  "topK": 30,
+  "repeatPenalty": 1.15,
+  "maxTokens": 4096,
+  "contextLength": 16384,
+
+  "chainOfThought": false,
+  "selfVerify": true,
+  "enhancePrompt": false,
+
+  "keywords": [
+    "write", "code", "implement", "create", "build", "function",
+    "class", "method", "api", "endpoint", "component", "fix",
+    "bug", "error", "debug", "refactor", "optimize", "test",
+    "program", "script", "algorithm", "database", "query",
+    "html", "css", "javascript", "python", "java", "typescript",
+    "react", "spring", "node", "express", "sql", "git",
+    "docker", "deploy", "crud", "rest", "frontend", "backend"
+  ]
+}

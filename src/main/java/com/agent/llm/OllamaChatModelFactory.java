@@ -38,10 +38,12 @@ public class OllamaChatModelFactory {
      */
     public OllamaStreamingChatModel getStreamingModel(String modelName, OllamaService.LlmParams params) {
         String effectiveModel = (modelName != null && !modelName.isBlank()) ? modelName : config.getModel();
-        String cacheKey = effectiveModel + ":" + params.contextLength();
+        String cacheKey = effectiveModel + ":" + params.contextLength() + ":" + params.maxTokens()
+                + ":" + params.temperature();
 
         return streamingCache.computeIfAbsent(cacheKey, key -> {
-            log.info("[Factory] Creating streaming model: {} (ctx={})", effectiveModel, params.contextLength());
+            log.info("[Factory] Creating streaming model: {} (ctx={}, predict={})",
+                    effectiveModel, params.contextLength(), params.maxTokens());
             return OllamaStreamingChatModel.builder()
                     .baseUrl(config.getBaseUrl())
                     .modelName(effectiveModel)
@@ -61,10 +63,11 @@ public class OllamaChatModelFactory {
      */
     public OllamaChatModel getBlockingModel(String modelName, OllamaService.LlmParams params) {
         String effectiveModel = (modelName != null && !modelName.isBlank()) ? modelName : config.getModel();
-        String cacheKey = effectiveModel + ":blocking:" + params.contextLength();
+        String cacheKey = effectiveModel + ":blocking:" + params.contextLength() + ":" + params.maxTokens();
 
         return blockingCache.computeIfAbsent(cacheKey, key -> {
-            log.info("[Factory] Creating blocking model: {} (ctx={})", effectiveModel, params.contextLength());
+            log.info("[Factory] Creating blocking model: {} (ctx={}, predict={})",
+                    effectiveModel, params.contextLength(), params.maxTokens());
             return OllamaChatModel.builder()
                     .baseUrl(config.getBaseUrl())
                     .modelName(effectiveModel)

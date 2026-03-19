@@ -112,15 +112,31 @@ public class ContextGatherer {
             // Determine what context is needed based on query patterns
             List<CompletableFuture<String>> contextFutures = new ArrayList<>();
 
-            // Web search runs on EVERY query — Bing RSS is unlimited and free.
-            // This is what makes the system Jarvis-like: always has real-time knowledge.
-            contextFutures.add(searchWeb(input));
+            // Detect if this is a workspace/project query vs a real-world query
+            boolean isWorkspaceQuery = workspaceConnected && (
+                    PROJECT_OVERVIEW.matcher(input).find() ||
+                    FILE_REFERENCE.matcher(input).find() ||
+                    CODE_ELEMENT.matcher(input).find() ||
+                    MODIFY_INTENT.matcher(input).find() ||
+                    DEBUG_INTENT.matcher(input).find() ||
+                    DEEP_EXPLAIN.matcher(input).find() ||
+                    ARCHITECTURE_QUERY.matcher(input).find() ||
+                    FILE_PATH.matcher(input).find() ||
+                    DIRECTORY_PATH.matcher(input).find() ||
+                    input.toLowerCase().matches(".*\\b(project|codebase|code|repo|workspace|this app)\\b.*"));
+
+            // Web search: always for non-workspace queries, skip for workspace/project queries
+            // "explain this project" → read workspace files, not search internet
+            // "top stocks India" → search internet
+            if (!isWorkspaceQuery) {
+                contextFutures.add(searchWeb(input));
+            }
 
             // Workspace-dependent context only if connected
             if (!workspaceConnected) {
                 // No workspace — only web search results (if any)
                 if (contextFutures.isEmpty()) {
-                    return "";
+                    contextFutures.add(searchWeb(input)); // Fallback: search anyway
                 }
                 // Execute web search and return
                 context.append("\n\n## CONTEXT (Real data — base your answer on this)\n\n");

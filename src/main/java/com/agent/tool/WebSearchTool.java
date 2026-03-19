@@ -42,8 +42,19 @@ public class WebSearchTool {
             .build();
     private final ObjectMapper objectMapper = new ObjectMapper();
 
+    @Value("${google.search.api-key:}")
+    private String googleApiKey;
+
+    @Value("${google.search.cx:}")
+    private String googleSearchCx;
+
     /**
      * Search the web for a query. Returns structured results.
+     *
+     * Priority:
+     * 1. Tavily (if TAVILY_API_KEY set) — best AI-optimized results
+     * 2. Google Custom Search (if GOOGLE_SEARCH_API_KEY + CX set) — 100 free/day
+     * 3. Bing RSS (always free, no key) — reliable fallback
      */
     public String search(String query) {
         long start = System.currentTimeMillis();
@@ -51,15 +62,22 @@ public class WebSearchTool {
             String result;
             if (tavilyApiKey != null && !tavilyApiKey.isBlank()) {
                 result = tavilySearch(query);
+            } else if (googleApiKey != null && !googleApiKey.isBlank()
+                    && googleSearchCx != null && !googleSearchCx.isBlank()) {
+                result = googleSearch(query);
             } else {
-                result = duckDuckGoSearch(query);
+                result = bingRssSearch(query);
             }
             long elapsed = System.currentTimeMillis() - start;
             log.info("[WebSearch] '{}' → {} chars in {}ms", query, result.length(), elapsed);
             return result;
         } catch (Exception e) {
-            log.error("[WebSearch] Failed for '{}': {}", query, e.getMessage());
-            return "Search failed: " + e.getMessage();
+            log.error("[WebSearch] Primary search failed, trying fallback: {}", e.getMessage());
+            // Fallback chain
+            try { return bingRssSearch(query); } catch (Exception e2) {
+                log.error("[WebSearch] All search engines failed for '{}': {}", query, e2.getMessage());
+                return "Search failed: " + e.getMessage();
+            }
         }
     }
 
@@ -98,6 +116,111 @@ public class WebSearchTool {
             log.error("[WebFetch] Failed for '{}': {}", url, e.getMessage());
             return "Failed to fetch URL: " + e.getMessage();
         }
+    }
+
+    // ─── Google Custom Search (free: 100 searches/day) ───
+
+    private String googleSearch(String query) throws Exception {
+        String encoded = URLEncoder.encode(query, StandardCharsets.UTF_8);
+        String url = "https://www.googleapis.com/customsearch/v1?key=" + googleApiKey
+                + "&cx=" + googleSearchCx + "&q=" + encoded + "&num=5";
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .timeout(Duration.ofSeconds(10))
+                .GET()
+                .build();
+
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        JsonNode root = objectMapper.readTree(response.body());
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("### Google Search Results (Live)\n\n");
+
+        JsonNode items = root.get("items");
+        if (items != null && items.isArray()) {
+            for (int i = 0; i < Math.min(items.size(), 5); i++) {
+                JsonNode item = items.get(i);
+                sb.append("**").append(i + 1).append(". ")
+                        .append(item.get("title").asText()).append("**\n");
+                sb.append(item.get("link").asText()).append("\n");
+                if (item.has("snippet")) {
+                    sb.append(item.get("snippet").asText()).append("\n");
+                }
+                sb.append("\n");
+            }
+        }
+
+        if (sb.length() < 50) {
+            return bingRssSearch(query); // Fallback to Bing if Google returns nothing
+        }
+
+        return sb.toString();
+    }
+
+    // ─── Bing RSS Search (free, no API key, real-time results) ───
+
+    private String bingRssSearch(String query) throws Exception {
+        String encoded = URLEncoder.encode(query, StandardCharsets.UTF_8);
+        String url = "https://www.bing.com/search?format=rss&q=" + encoded + "&count=6";
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                .timeout(Duration.ofSeconds(10))
+                .GET()
+                .build();
+
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        String xml = response.body();
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("### Web Search Results (Live)\n\n");
+
+        // Parse RSS XML — extract title, link, description from each <item>
+        String[] items = xml.split("<item>");
+        int count = 0;
+        for (int i = 1; i < items.length && count < 6; i++) {
+            String item = items[i];
+            String title = extractXmlTag(item, "title");
+            String link = extractXmlTag(item, "link");
+            String description = extractXmlTag(item, "description");
+
+            if (title != null && !title.isBlank()) {
+                count++;
+                sb.append("**").append(count).append(". ").append(title).append("**\n");
+                if (link != null) sb.append(link).append("\n");
+                if (description != null && !description.isBlank()) {
+                    // Clean HTML entities
+                    String clean = description
+                            .replaceAll("&amp;", "&")
+                            .replaceAll("&lt;", "<")
+                            .replaceAll("&gt;", ">")
+                            .replaceAll("&#\\d+;", " ")
+                            .replaceAll("<[^>]+>", "")
+                            .trim();
+                    if (clean.length() > 300) clean = clean.substring(0, 300) + "...";
+                    sb.append(clean).append("\n");
+                }
+                sb.append("\n");
+            }
+        }
+
+        if (count == 0) {
+            // Fallback to DuckDuckGo if Bing returns nothing
+            return duckDuckGoSearch(query);
+        }
+
+        return sb.toString();
+    }
+
+    private String extractXmlTag(String xml, String tag) {
+        int start = xml.indexOf("<" + tag + ">");
+        int end = xml.indexOf("</" + tag + ">");
+        if (start >= 0 && end > start) {
+            return xml.substring(start + tag.length() + 2, end).trim();
+        }
+        return null;
     }
 
     // ─── Tavily Search (primary — best quality for AI agents) ───
